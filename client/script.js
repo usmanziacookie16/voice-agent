@@ -1,19 +1,19 @@
-const startBtn = document.getElementById('startBtn');
-const stopBtn = document.getElementById('stopBtn');
-const transcriptionDiv = document.getElementById('transcription');
+const toggleButton = document.getElementById('toggleButton');
+const currentSpeechDiv = document.getElementById('currentSpeech');
+const agentStatus = document.getElementById('agentStatus');
 
 let ws, audioContext, processor, source;
 let isRecording = false;
-let currentAssistantMessage = null;
-let currentAssistantText = '';
-let pendingUserMessage = null;
+let currentSpeechBubble = null;
+let currentSpeechText = '';
 let messageSequence = 0;
 
 // Track if this is the first connection or a reconnection
 let isFirstConnection = true;
 let currentSessionId = null; // Track current session to avoid duplicates
-let persistentConversationId = null; // Persistent conversation ID across manual stops
+let persistentConversationId = null; // Persistent conversation ID across manual pauses
 let hasHadFirstGreeting = false; // Track if we've ever had the initial greeting
+let wasPausedManually = false; // Track if user manually paused (for "ready to continue" message)
 
 // Connection management
 let reconnectAttempts = 0;
@@ -31,7 +31,6 @@ let currentAudioSource = null;
 
 // Detect browser and show compatibility warning
 function detectBrowser() {
-	
   const userAgent = navigator.userAgent.toLowerCase();
   const isFirefox = userAgent.indexOf('firefox') > -1;
   const isSafari = userAgent.indexOf('safari') > -1 && userAgent.indexOf('chrome') === -1;
@@ -55,39 +54,32 @@ function showBrowserWarning(message) {
 // Check browser on load
 detectBrowser();
 
-// Update voice button and status based on recording state
-function updateVoiceUI(recording) {
-  const voiceButton = document.getElementById('voiceButton');
-  const agentStatus = document.getElementById('agentStatus');
-  
-  if (recording) {
-    voiceButton.classList.add('active');
+// Update UI based on recording state
+function updateUI(listening) {
+  if (listening) {
+    toggleButton.classList.add('active');
     agentStatus.textContent = 'Listening...';
     agentStatus.classList.add('listening');
   } else {
-    voiceButton.classList.remove('active');
-    agentStatus.textContent = 'Ready to listen';
+    toggleButton.classList.remove('active');
+    // Change "Ready to listen" to "Paused" or keep it as "Ready"
+    agentStatus.textContent = wasPausedManually ? 'Paused' : 'Ready to listen';
     agentStatus.classList.remove('listening');
   }
 }
 
-// Voice button click handler - must be set up after DOM loads
-document.addEventListener('DOMContentLoaded', () => {
-  const voiceButton = document.getElementById('voiceButton');
-  
-  voiceButton.addEventListener('click', () => {
-    console.log('Voice button clicked, active:', voiceButton.classList.contains('active'));
-    if (voiceButton.classList.contains('active')) {
-      // Currently recording, so stop
-      stopBtn.click();
-    } else {
-      // Not recording, so start
-      startBtn.click();
-    }
-  });
+// Toggle button click handler
+toggleButton.addEventListener('click', () => {
+  if (isRecording) {
+    // Currently recording, so pause
+    stopRecording();
+  } else {
+    // Not recording, so start
+    startRecording();
+  }
 });
 
-startBtn.onclick = async () => {
+async function startRecording() {
   if (isRecording) return;
   
   // Get username from session
@@ -102,23 +94,23 @@ startBtn.onclick = async () => {
   console.log('Starting with username:', username);
   
   isRecording = true;
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-  updateVoiceUI(true);
+  updateUI(true);
 
-  // Don't clear transcription if resuming - only show placeholder if empty
-  if (transcriptionDiv.children.length === 0 || transcriptionDiv.querySelector('.welcome-message')) {
-    transcriptionDiv.innerHTML = '<p class="placeholder"><em>Listening...</em></p>';
+  // Clear welcome message if present
+  const welcomeMsg = currentSpeechDiv.querySelector('.welcome-message');
+  if (welcomeMsg) {
+    welcomeMsg.remove();
   }
 
-  ws = new WebSocket(`ws://${window.location.host}`);
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${protocol}//${window.location.host}`);
 
   // Connection timeout (10 seconds)
   connectionTimeout = setTimeout(() => {
     if (ws.readyState !== WebSocket.OPEN) {
       console.error('❌ Connection timeout');
       ws.close();
-      showConnectionError('Connection timeout. Please check your internet and try again.');
+      showErrorBubble('Connection timeout. Please check your internet and try again.');
       cleanup(false);
     }
   }, 10000);
@@ -131,15 +123,15 @@ startBtn.onclick = async () => {
     // Start heartbeat monitoring
     startHeartbeat();
     
-    // Remove any connection errors
-    removeConnectionError();
+    // Remove any error messages
+    removeErrorBubble();
     
     // Generate or reuse session ID
     if (!currentSessionId) {
       currentSessionId = Date.now();
     }
     
-    // Generate or reuse conversation ID (persists across manual stops)
+    // Generate or reuse conversation ID (persists across manual pauses)
     if (!persistentConversationId) {
       persistentConversationId = currentSessionId;
       console.log('🆕 New conversation ID:', persistentConversationId);
@@ -147,24 +139,22 @@ startBtn.onclick = async () => {
       console.log('🔄 Reusing conversation ID:', persistentConversationId);
     }
     
+    // Determine if we have messages (was paused)
+    const hasMessages = wasPausedManually;
+    
     ws.send(JSON.stringify({ 
       type: "start",
       username: username,
       sessionId: currentSessionId,
       conversationId: persistentConversationId,
       isReconnection: !isFirstConnection,
-      hasMessages: transcriptionDiv.querySelectorAll('.message').length > 0
+      hasMessages: hasMessages
     }));
     
     // Mark that first connection has been made
     if (isFirstConnection) {
       isFirstConnection = false;
       hasHadFirstGreeting = true;
-    }
-
-    // Only show placeholder if conversation is empty
-    if (transcriptionDiv.children.length === 0 || transcriptionDiv.querySelector('.placeholder')) {
-      transcriptionDiv.innerHTML = '<p class="placeholder"><em>Starting conversation...</em></p>';
     }
 
     try {
@@ -269,91 +259,53 @@ startBtn.onclick = async () => {
     // Update heartbeat timestamp
     lastHeartbeat = Date.now();
     
-    // Remove any connection error messages on successful message
-    removeConnectionError();
+    // Remove any error messages on successful message
+    removeErrorBubble();
     
     // Debug logging (except audio deltas)
     if (msg.type !== 'assistant_audio_delta') {
       console.log('📨 Received:', msg.type, msg.text ? `"${msg.text.substring(0, 50)}${msg.text.length > 50 ? '...' : ''}"` : '');
     }
 
-    // Show user message
+    // User transcription - we don't display user messages anymore
     if (msg.type === 'user_transcription') {
-      // Remove placeholder/welcome message if it exists
-      const placeholder = transcriptionDiv.querySelector('.placeholder');
-      if (placeholder) placeholder.remove();
-      const welcome = transcriptionDiv.querySelector('.welcome-message');
-      if (welcome) welcome.remove();
-
-      // Mark all existing messages as older
-      markMessagesAsOlder();
-
-      // If there's a pending assistant message, add user message first
-      if (currentAssistantMessage) {
-        const p = document.createElement('p');
-        p.classList.add('message', 'user-message', 'recent');
-        p.innerHTML = `<strong>You:</strong> ${escapeHtml(msg.text)}`;
-        p.dataset.sequence = messageSequence++;
-        transcriptionDiv.insertBefore(p, currentAssistantMessage);
-        
-        // Mark current assistant message as recent too
-        currentAssistantMessage.classList.add('recent');
-        currentAssistantMessage.classList.remove('older');
-      } else {
-        const p = document.createElement('p');
-        p.classList.add('message', 'user-message', 'recent');
-        p.innerHTML = `<strong>You:</strong> ${escapeHtml(msg.text)}`;
-        p.dataset.sequence = messageSequence++;
-        transcriptionDiv.appendChild(p);
-      }
-      
-      // Auto-scroll to bottom with extra padding
-      transcriptionDiv.scrollTop = transcriptionDiv.scrollHeight + 50;
+      console.log('👤 User said:', msg.text);
     }
 
     // Stream assistant text in real-time (FASTER than audio transcript)
     if (msg.type === 'assistant_transcript_delta') {
-      // Remove placeholder/welcome message if still exists
-      const placeholder = transcriptionDiv.querySelector('.placeholder');
-      if (placeholder) placeholder.remove();
-      const welcome = transcriptionDiv.querySelector('.welcome-message');
-      if (welcome) welcome.remove();
+      // Remove welcome message if still exists
+      const welcomeMsg = currentSpeechDiv.querySelector('.welcome-message');
+      if (welcomeMsg) welcomeMsg.remove();
       
-      // Create assistant message if it doesn't exist yet
-      if (!currentAssistantMessage) {
-        // Mark all existing messages as older when assistant starts responding
-        markMessagesAsOlder();
-        
-        currentAssistantText = '';
-        currentAssistantMessage = document.createElement("p");
-        currentAssistantMessage.classList.add("message", "assistant-message", "recent");
-        currentAssistantMessage.innerHTML = `<strong>Assistant:</strong> <span class="response-text"></span>`;
-        currentAssistantMessage.dataset.sequence = messageSequence++;
-        transcriptionDiv.appendChild(currentAssistantMessage);
+      // Create speech bubble if it doesn't exist yet
+      if (!currentSpeechBubble) {
+        currentSpeechText = '';
+        currentSpeechBubble = document.createElement("div");
+        currentSpeechBubble.classList.add("speech-bubble");
+        currentSpeechBubble.innerHTML = `<span class="speech-text"></span>`;
+        currentSpeechDiv.innerHTML = ''; // Clear any previous content
+        currentSpeechDiv.appendChild(currentSpeechBubble);
       }
       
-      if (currentAssistantMessage) {
-        currentAssistantText += msg.text;
-        const span = currentAssistantMessage.querySelector(".response-text");
-        span.textContent = currentAssistantText;
+      if (currentSpeechBubble) {
+        currentSpeechText += msg.text;
+        const span = currentSpeechBubble.querySelector(".speech-text");
+        span.textContent = currentSpeechText;
         span.classList.add('typing');
-        
-        // Auto-scroll to bottom with extra padding
-        transcriptionDiv.scrollTop = transcriptionDiv.scrollHeight + 50;
       }
     }
 
     // Complete transcript received - ensure nothing is missing
     if (msg.type === 'assistant_transcript_complete') {
-      if (currentAssistantMessage) {
-        const span = currentAssistantMessage.querySelector(".response-text");
+      if (currentSpeechBubble) {
+        const span = currentSpeechBubble.querySelector(".speech-text");
         
         // Use complete transcript if it's longer (fixes incomplete streaming)
-        if (msg.text.length > currentAssistantText.length) {
+        if (msg.text.length > currentSpeechText.length) {
           console.log('✅ Using complete transcript (was incomplete)');
-          currentAssistantText = msg.text;
-          span.textContent = currentAssistantText;
-          transcriptionDiv.scrollTop = transcriptionDiv.scrollHeight + 50;
+          currentSpeechText = msg.text;
+          span.textContent = currentSpeechText;
         }
       }
     }
@@ -365,23 +317,23 @@ startBtn.onclick = async () => {
       // Stop all audio playback immediately
       stopAudioPlayback();
       
-      if (currentAssistantMessage) {
-        const span = currentAssistantMessage.querySelector(".response-text");
+      if (currentSpeechBubble) {
+        const span = currentSpeechBubble.querySelector(".speech-text");
         span.classList.remove('typing');
         
         // Add ellipsis to show it was cut off
-        if (!currentAssistantText.endsWith('...')) {
-          currentAssistantText += '...';
-          span.textContent = currentAssistantText;
+        if (!currentSpeechText.endsWith('...')) {
+          currentSpeechText += '...';
+          span.textContent = currentSpeechText;
         }
         
         // Add interrupted class for visual feedback
-        currentAssistantMessage.classList.add('interrupted');
+        currentSpeechBubble.classList.add('interrupted');
       }
       
       // Reset for next response
-      currentAssistantMessage = null;
-      currentAssistantText = '';
+      currentSpeechBubble = null;
+      currentSpeechText = '';
     }
 
     // Stream assistant TTS audio (base64 PCM16)
@@ -393,29 +345,26 @@ startBtn.onclick = async () => {
     if (msg.type === 'response_complete') {
       console.log('✅ Response complete');
       
-      if (currentAssistantMessage) {
-        const span = currentAssistantMessage.querySelector(".response-text");
+      if (currentSpeechBubble) {
+        const span = currentSpeechBubble.querySelector(".speech-text");
         if (span) span.classList.remove('typing');
       }
       
-      // Reset for next response
-      currentAssistantMessage = null;
-      currentAssistantText = '';
+      // Keep the bubble visible (don't reset)
+      // Only reset the reference so a new bubble is created next time
+      currentSpeechBubble = null;
+      currentSpeechText = '';
     }
 
     // Error handling
     if (msg.type === 'error') {
-      const errorP = document.createElement('p');
-      errorP.classList.add('message', 'error-message');
-      errorP.innerHTML = `<strong>Error:</strong> ${escapeHtml(msg.message)}`;
-      transcriptionDiv.appendChild(errorP);
-      transcriptionDiv.scrollTop = transcriptionDiv.scrollHeight + 50;
+      showErrorBubble(msg.message);
     }
   };
 
   ws.onerror = (error) => {
     console.error('WebSocket error:', error);
-    showConnectionError('Connection error. Retrying...');
+    showErrorBubble('Connection error. Retrying...');
     
     // CRITICAL: Request emergency save from server
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -436,50 +385,48 @@ startBtn.onclick = async () => {
       if (event.code !== 1000 && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         reconnectAttempts++;
         console.log(`🔄 Reconnection attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
-        showConnectionError(`Connection lost. Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+        showErrorBubble(`Connection lost. Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
         
         setTimeout(() => {
           if (isRecording) {
-            // Reconnect without clearing conversation
-            const existingMessages = transcriptionDiv.querySelectorAll('.message');
-            startBtn.click();
+            startRecording();
           }
         }, RECONNECT_DELAY);
       } else {
-        cleanup(false); // Connection lost, not manual stop
+        cleanup(false); // Connection lost, not manual pause
         if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-          showConnectionError('Connection lost after multiple attempts. Please try again.');
-        } else if (transcriptionDiv.children.length === 0) {
-          showConnectionError('Connection lost. Please try again.');
+          showErrorBubble('Connection lost after multiple attempts. Please try again.');
         }
       }
     }
   };
-};
+}
 
-stopBtn.onclick = () => {
-  console.log('🛑 Stop button pressed - saving and preparing for new session');
+function stopRecording() {
+  console.log('⏸️ Pause button pressed - saving conversation');
+  
+  // Mark that this was a manual pause
+  wasPausedManually = true;
   
   // Send stop signal to server (will trigger save)
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
-      ws.send(JSON.stringify({ type: 'stop', requestNewSession: true }));
-      console.log('📤 Stop signal sent to server');
+      // Don't request new session - we want to continue this conversation
+      ws.send(JSON.stringify({ type: 'stop', requestNewSession: false }));
+      console.log('📤 Pause signal sent to server');
     } catch (err) {
-      console.error('Error sending stop signal:', err);
+      console.error('Error sending pause signal:', err);
     }
   }
   
-  // Clean up and reset for new session
-  cleanup(true); // Manual stop
-};
+  // Clean up but keep conversation state
+  cleanup(true); // Manual pause
+}
 
-function cleanup(isManualStop = false) {
-  console.log('Cleaning up...', isManualStop ? '(manual stop)' : '(connection lost)');
+function cleanup(isManualPause = false) {
+  console.log('Cleaning up...', isManualPause ? '(manual pause)' : '(connection lost)');
   isRecording = false;
-  startBtn.disabled = false;
-  stopBtn.disabled = true;
-  updateVoiceUI(false);
+  updateUI(false);
 
   stopAudioPlayback();
   stopHeartbeat();
@@ -514,23 +461,19 @@ function cleanup(isManualStop = false) {
     ws.close();
   }
   
-  // Keep conversation history - only reset current message state
-  currentAssistantMessage = null;
-  currentAssistantText = '';
+  // Keep speech bubble visible
+  // Reset current speech state for next response
+  currentSpeechBubble = null;
+  currentSpeechText = '';
   
-  // If manually stopped (user clicked stop), reset session completely for NEW conversation
-  // If connection lost, keep session for reconnection
-  if (isManualStop) {
-    console.log('🔄 Manual stop - resetting for NEW conversation (new row in database)');
-    isFirstConnection = true;
-    currentSessionId = null;
-    persistentConversationId = null; // Clear this to create new row
-    hasHadFirstGreeting = false; // Reset greeting flag
+  // If manually paused, keep everything for resume
+  // If connection lost, also keep state for reconnection
+  if (isManualPause) {
+    console.log('⏸️ Manual pause - ready to resume conversation');
+    // Don't reset session or conversation ID - we want to continue
   } else {
     console.log('🔌 Connection lost - session preserved for reconnection');
   }
-  
-  // Keep messageSequence to continue numbering
 }
 
 // Heartbeat to detect connection issues
@@ -541,7 +484,7 @@ function startHeartbeat() {
       const timeSinceLastMessage = Date.now() - lastHeartbeat;
       if (timeSinceLastMessage > 30000) { // 30 seconds without any message
         console.warn('⚠️ No server response for 30 seconds');
-        showConnectionError('Connection may be unstable...');
+        showErrorBubble('Connection may be unstable...');
       }
     }
   }, 5000); // Check every 5 seconds
@@ -554,22 +497,22 @@ function stopHeartbeat() {
   }
 }
 
-// Show connection error message
-function showConnectionError(message) {
-  // Remove any existing connection errors first
-  removeConnectionError();
+// Show error as a bubble
+function showErrorBubble(message) {
+  // Remove any existing errors first
+  removeErrorBubble();
   
-  const errorP = document.createElement('p');
-  errorP.classList.add('message', 'error-message', 'connection-error');
-  errorP.innerHTML = `<strong>Connection:</strong> ${escapeHtml(message)}`;
-  transcriptionDiv.appendChild(errorP);
-  transcriptionDiv.scrollTop = transcriptionDiv.scrollHeight + 50;
+  const errorBubble = document.createElement('div');
+  errorBubble.classList.add('speech-bubble', 'interrupted', 'error-bubble');
+  errorBubble.innerHTML = `<span class="speech-text">⚠️ ${escapeHtml(message)}</span>`;
+  currentSpeechDiv.innerHTML = '';
+  currentSpeechDiv.appendChild(errorBubble);
 }
 
-// Remove connection error messages
-function removeConnectionError() {
-  const connectionErrors = transcriptionDiv.querySelectorAll('.connection-error');
-  connectionErrors.forEach(error => error.remove());
+// Remove error bubbles
+function removeErrorBubble() {
+  const errorBubbles = currentSpeechDiv.querySelectorAll('.error-bubble');
+  errorBubbles.forEach(bubble => bubble.remove());
 }
 
 // Stop audio playback immediately (for interruptions)
@@ -710,15 +653,6 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-// Mark all existing messages as older (fade them)
-function markMessagesAsOlder() {
-  const allMessages = transcriptionDiv.querySelectorAll('.message');
-  allMessages.forEach(msg => {
-    msg.classList.remove('recent');
-    msg.classList.add('older');
-  });
-}
-
 // Handle page visibility changes
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && isRecording) {
@@ -740,6 +674,6 @@ window.addEventListener('beforeunload', (event) => {
     } catch (err) {
       console.error('Could not send emergency save on unload:', err);
     }
-    cleanup(true); // Treat page unload as manual stop
+    cleanup(true); // Treat page unload as manual pause
   }
 });
