@@ -38,6 +38,60 @@ const clientPath = fs.existsSync('../client') ? '../client' : './client';
 app.use(express.static(clientPath));
 console.log(`📁 Serving static files from: ${clientPath}`);
 
+// Middleware to parse JSON bodies
+app.use(express.json());
+
+// --- AUTH API ROUTES ---
+
+// Sign Up Route
+app.post('/api/signup', async (req, res) => {
+  const { username, password } = req.body;
+  
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .insert([{ username, password }])
+      .select();
+
+    if (error) {
+      // Check for unique constraint violation (username exists)
+      if (error.code === '23505') {
+        return res.status(400).json({ error: 'Username already exists' });
+      }
+      throw error;
+    }
+
+    res.json({ success: true, message: 'User created' });
+  } catch (err) {
+    console.error('Signup Error:', err.message);
+    res.status(500).json({ error: 'Failed to create user' });
+  }
+});
+
+// Login Route
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body;
+
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('username', username)
+      .eq('password', password)
+      .single();
+
+    if (error || !data) {
+      return res.status(401).json({ error: 'Invalid username or password' });
+    }
+
+    res.json({ success: true, username: data.username });
+  } catch (err) {
+    console.error('Login Error:', err.message);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+
 // Supabase Connection
 const supabaseUrl = config.SUPABASE_URL;
 const supabaseKey = config.SUPABASE_KEY;
@@ -240,7 +294,7 @@ wss.on('connection', async (clientWs) => {
       sessionId = msg.sessionId || Date.now();
       conversationId = msg.conversationId || sessionId; // Use provided conversationId
       isReconnection = msg.isReconnection || false;
-      const hasMessages = msg.hasMessages || false; // Check if client has conversation history
+      const hasMessages = msg.hasMessages || false; // Check if client has conversation history (was paused)
       
       console.log(`👤 User: ${username} | Session: ${sessionId} | Conversation: ${conversationId} | Reconnection: ${isReconnection} | Has Messages: ${hasMessages}`);
       
@@ -270,46 +324,23 @@ wss.on('connection', async (clientWs) => {
           session: {
             modalities: ['text', 'audio'],
             instructions: `Act as a facilitator to help the user write a self-reflection. The user recently wrote a term paper. Your task is to facilitate the user writing the self-reflection via multi-turn dialogue
-You will ask open-ended questions that should align with the six stages of Gibbs’ Reflective Cycle in this order: Description, Feelings, Evaluation, Analysis, Conclusion, and Action Plan. You are to remain implicit regarding the phases of Gibbs’ Reflective Cycle throughout the session.
-.At the start of each phase, ask one of the following questions in order:
+You will ask open-ended questions that should align with the six stages of Gibbs' Reflective Cycle in this order: Description, Feelings, Evaluation, Analysis, Conclusion, and Action Plan. You are to remain implicit regarding the phases of Gibbs' Reflective Cycle throughout the session.
+
+
+At the start of each phase, ask one of the following questions in order:
 1. Can you describe the process of writing your term paper, from planning to completion?
 2. How did you feel while working on the term paper, especially during challenging moments?
-3. What aspects of your term paper do you think went well, and what didn’t work as effectively?
+3. What aspects of your term paper do you think went well, and what didn't work as effectively?
 4. Why do you think certain parts of the process were successful or unsuccessful? Were there any factors or strategies that contributed to the outcome?
 5. What have you learned from writing this term paper, both about the subject and your own writing process?
 6. What will you do differently in your next term paper to improve your approach and results?
-Prefer one question per turn afterward to keep the reflection focused and maintain natural pacing
-- After asking the phase-start question, continue the dialogue with process-focused follow-ups to prompt elaboration. 
-- Only move to the next phase if the user provides sufficient detail or explicitly refuses. 
-- Do not mention the phase name or Gibbs’ model in any output.
-Do not progress to the next phase until the user provides a minimally sufficient descriptive answer for the current phase.
- If the user gives a one-line answer, or an answer containing only a single idea or detail, you must ask at least one clarifying or elaborative question before moving forward.
-Only move to the next phase if:
-the user has provided enough detail for that phase, or
 
+Ask one main question per turn exactly as they are written above. When asking these main questions do not add any examples based on previous input. Use specific, process-focused follow-up questions if the response is brief or lacks detail. Ask specific questions rather than generic questions. Do not move to the next question unless the user provides sufficient detail or explicitly refuses to elaborate. If the user refuses, acknowledge briefly and continue without pressure.
 
-the user clearly indicates unwillingness to elaborate (e.g., “skip”, “continue”, “I don’t know”, “no more details”).
-
-
-If the user is unwilling, acknowledge briefly and move to the next phase without pressure.
- If they are willing but brief, nudge gently with a specific follow-up question.
-
-
-
-Your behavior must always:
-stay in the phase if detail is insufficient and the user is willing,
-
-
-move on only when detail is sufficient or the user refuses.
-Ask specific questions rather than generic questions.
-Use Guiding Questions to facilitate the self-reflection.  
-Provide process-level micro-feedback provided by the user. The feedback should focus on the level of reflection rather than the content of the experience. Encourage, supervise, and incorporate social and personal values. You are not suppose to do reflection yourself but rather it is responsibility of the user as she/he is engaged in self-reflection
-Use Scaffolded Follow-up questions can also be employed to explore deeper when needed. 
+Provide feedback on each answer provided by the user. The feedback should focus on the level of reflection rather than the content of the experience. Encourage, supervise, and incorporate social and personal values. Scaffolded Follow-up questions can also be employed to explore deeper when needed.
 Request specific examples from the user. If the student mentions a shift in views, prompt him for examples from his experience that illustrate this change.
-After completing the Action Plan stage, implicitly indicate that the reflection is complete. Then ask the user if they would like any of the following such as a summary of their reflection, feedback on the level of reflection or any other remarks or suggestions. Be very concise and precise. Do not mention the Gibbs stages explicitly
+Do not perform the reflection for the user. Do Not Respond with more than 1-3 sentences or Questions. Always response in English Language.
 
-
-Do Not Respond with more than 1-3 sentences or Questions
 `,
             voice: 'alloy',
             input_audio_format: 'pcm16',
@@ -328,7 +359,7 @@ Do Not Respond with more than 1-3 sentences or Questions
 
         // Send initial greeting based on connection type
         if (!isReconnection && !hasMessages) {
-          // First time ever OR new session after stop - initial greeting
+          // First time ever OR new session after complete stop - initial greeting
           setTimeout(() => {
             console.log('🎤 Sending initial greeting (first time or new session)');
             openaiWs.send(JSON.stringify({
@@ -353,11 +384,10 @@ Do Not Respond with more than 1-3 sentences or Questions
               }
             }));
           }, 500);
-        } else if (hasMessages && !isReconnection) {
-          // This shouldn't happen anymore since we clear persistentConversationId on manual stop
-          // But keeping as fallback
+        } else if (hasMessages) {
+          // User paused and is now resuming - "ready to continue" message
           setTimeout(() => {
-            console.log('👋 Sending welcome back message (fallback)');
+            console.log('👋 Sending welcome back message (resume after pause)');
             openaiWs.send(JSON.stringify({
               type: 'conversation.item.create',
               item: {
@@ -586,7 +616,7 @@ Do Not Respond with more than 1-3 sentences or Questions
       openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: msg.audio }));
     }
 
-    // Stop message - save and prepare for next session
+    // Stop message - save conversation
     if (msg.type === 'stop') {
       const requestNewSession = msg.requestNewSession || false;
       
@@ -666,7 +696,7 @@ server.listen(config.PORT || process.env.PORT || 3000, '0.0.0.0', () => {
   console.log(`Server running on port ${port}`);
   console.log(`Local: http://localhost:${port}`);
   if (process.env.PORT) {
-    console.log('🌐 Running in production mode');
+    console.log('🌍 Running in production mode');
   } else {
     console.log(`Local network access: http://[YOUR_IP]:${port}`);
   }
