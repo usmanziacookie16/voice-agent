@@ -158,7 +158,7 @@ async function saveConversation(username, conversationId, messages, sessionId = 
   const conversationData = {
     username: username,
     conversation_id: conversationId,
-    condition: 'C',
+    condition: 'OC',
     timestamp: new Date().toISOString(),
     messages: messages,
     total_messages: messages.length,
