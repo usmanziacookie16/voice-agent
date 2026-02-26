@@ -327,9 +327,9 @@ Do Not Respond with more than 1-3 question or Question
             input_audio_transcription: { model: 'whisper-1' },
             turn_detection: { 
               type: 'server_vad', 
-              threshold: 0.6,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 2000
+              threshold: 0.8,
+              prefix_padding_ms: 500,
+              silence_duration_ms: 3000
             },
             temperature: 1.0,
             max_response_output_tokens: 800
