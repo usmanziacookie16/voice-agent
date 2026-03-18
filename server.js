@@ -158,7 +158,7 @@ async function saveConversation(username, conversationId, messages, sessionId = 
   const conversationData = {
     username: username,
     conversation_id: conversationId,
-    condition: 'OC',
+    condition: 'C',
     timestamp: new Date().toISOString(),
     messages: messages,
     total_messages: messages.length,
@@ -254,6 +254,10 @@ wss.on('connection', async (clientWs) => {
   let currentResponseId = null;
   let currentAssistantMessage = { role: 'assistant', content: '', timestamp: null, interrupted: false };
   let isReconnection = false;
+
+  // FIX: capture user speech start time so user timestamp is always
+  // earlier than the assistant timestamp set at response.created
+  let pendingUserTimestamp = null;
   
   let lastSavedMessageCount = 0;
   const autoSaveInterval = setInterval(() => {
@@ -313,14 +317,7 @@ wss.on('connection', async (clientWs) => {
           type: 'session.update',
           session: {
             modalities: ['text', 'audio'],
-            instructions: `Act as a facilitator to help the user write a self-reflection. The user recently wrote a term paper. Your task is to facilitate the user writing the self-reflection via multi-turn dialogue
-You will ask open-ended questions that should align with the six stages of Gibbs’ Reflective Cycle in this order Description, Feelings, Evaluation, Analysis, Conclusion, and Action Plan.
-Ask specific questions rather than generic questions.
-Provide feedback on each answer provided by the user. The feedback should focus on the level of reflection rather than the content of the experience. Encourage, supervise, and incorporate social and personal values. 
-Follow-up questions can also be employed to explore deeper when needed. 
-Request specific examples from the user. If the student mentions a shift in views, prompt him for examples from his experience that illustrate this change.
-Do Not Respond with more than 1-3 question or Question
-`,
+            instructions: `Act as a facilitator to help the user write a self-reflection. The user recently wrote a term paper. Your task is to facilitate the user writing the self-reflection via multi-turn dialogue You will ask open-ended questions that should align with the six stages of Gibbs’ Reflective Cycle in this order Description, Feelings, Evaluation, Analysis, Conclusion, and Action Plan. Ask specific questions rather than generic questions. Provide feedback on each answer provided by the user. The feedback should focus on the level of reflection rather than the content of the experience. Encourage, supervise, and incorporate social and personal values. Follow-up questions can also be employed to explore deeper when needed. Request specific examples from the user. If the student mentions a shift in views, prompt him for examples from his experience that illustrate this change. Do Not Respond with more than 1-3 question or Question.`,
             voice: 'alloy',
             input_audio_format: 'pcm16',
             output_audio_format: 'pcm16',
@@ -372,7 +369,7 @@ Do Not Respond with more than 1-3 question or Question
                 role: 'user',
                 content: [{
                   type: 'input_text',
-                  text: 'Say "Hello there, I am Lexi. I am here to assist you in writing the self-reflection on the term paper you wrote. Can you describe your experience there?"'
+                  text: 'Say "Hello there, I am Lexi. I am here to assist you in writing the self-reflection on the term paper, essay, thesis or report you wrote. Can you describe your experience there?"'
                 }]
               }
             }));
@@ -399,6 +396,9 @@ Do Not Respond with more than 1-3 question or Question
 
         if (event.type === 'input_audio_buffer.speech_started') {
           console.log('🎤 User started speaking');
+          // FIX: capture timestamp at the moment user starts speaking,
+          // so it is guaranteed to be earlier than response.created
+          pendingUserTimestamp = new Date().toISOString();
           clientWs.send(JSON.stringify({ type: 'speech_started' }));
           
           if (activeResponse && currentResponseId) {
@@ -435,12 +435,15 @@ Do Not Respond with more than 1-3 question or Question
         if (event.type === 'conversation.item.input_audio_transcription.completed') {
           console.log('📝 Transcription:', event.transcript);
           
+          // FIX: use pendingUserTimestamp (set at speech_started) instead of
+          // new Date() here, which would be later than response.created
           conversationMessages.push({
             sequence: messageSequence++,
             role: 'user',
             content: event.transcript,
-            timestamp: new Date().toISOString()
+            timestamp: pendingUserTimestamp || new Date().toISOString()
           });
+          pendingUserTimestamp = null; // reset for next turn
           
           if (username) {
             saveConversation(username, conversationId, conversationMessages, sessionId, true);
@@ -457,6 +460,8 @@ Do Not Respond with more than 1-3 question or Question
           // Send thinking indicator to client
           clientWs.send(JSON.stringify({ type: 'response_creating' }));
           
+          // Timestamp set here (response.created) is always after speech_started,
+          // so assistant timestamp will always be >= user timestamp
           currentAssistantMessage = {
             role: 'assistant',
             content: '',
